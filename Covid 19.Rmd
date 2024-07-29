@@ -1,0 +1,383 @@
+---
+title: "Covid 19 project"
+author:
+date: '2022-04-24'
+output: html_document
+---
+# Covid-19 cases and evolution. 
+## How did the cases and lethality of Covid-19 behaved worldwide and which Countries had the highest amount of cases? 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries,message = FALSE}
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(patchwork) #to display to plots together
+```
+## Import the data sets. 
+We load the data of covid-19 cases and deaths from the John Hopkins github Covid-19 Repository. <https://github.com/CSSEGISandData/COVID-19>.
+
+```{r, dataimport_covid,message = FALSE }
+url_in <- "https://raw.github.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+file_names <- c("time_series_covid19_confirmed_global.csv","time_series_covid19_deaths_global.csv",
+                "time_series_covid19_confirmed_US.csv","time_series_covid19_deaths_US.csv")
+
+urls <- str_c(url_in,file_names)
+global_cases <- read_csv(urls[1])
+global_deaths <- read_csv(urls[2])
+us_cases <- read_csv(urls[3])
+us_deaths <- read_csv(urls[4])
+```
+
+
+We load the population data for the countries in the global database. Such data also comes from the John Hopkins repository. 
+
+```{r pop_data}
+url_UID <- "https://raw.github.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+uid <- read_csv(url_UID)
+#Keep only what we care about
+uid <- uid %>%
+  select(-c(Lat,Long_,Combined_Key))
+  
+```
+
+
+
+
+## Data Cleaning
+First  we pivot the data frames to have a column of dates. Instead of a column for each date. 
+```{r, tidydata}
+#Pivot the data to a more convenient format
+global_cases <- global_cases %>%
+  pivot_longer(cols = -c(`Province/State`,`Country/Region`, `Lat`,`Long`),
+               names_to = "date",
+               values_to = "cases") %>%
+  select(-c(Lat,Long))
+
+global_deaths <- global_deaths %>%
+  pivot_longer(cols = -c(`Province/State`,`Country/Region`, `Lat`,`Long`),
+               names_to = "date",
+               values_to = "deaths") %>%
+  select(-c(Lat,Long))
+
+
+us_cases <- us_cases %>%
+  pivot_longer(cols = -c("UID","iso2","iso3","code3","FIPS","Admin2", 
+                         "Province_State", "Country_Region", "Lat" , "Long_", "Combined_Key"),
+               names_to = "date",
+               values_to = "cases") %>%
+  select(-c(Lat,Long_))
+
+us_deaths <- us_deaths %>%
+  pivot_longer(cols = -c("UID","iso2","iso3","code3","FIPS","Admin2", "Province_State",
+                         "Country_Region", "Lat" , "Long_", "Combined_Key", "Population"),
+               names_to = "date",
+               values_to = "deaths") %>%
+  select(-c(Lat,Long_))
+
+
+```
+
+
+We join the global data in one data frame and add the population data, and the US data in another data frame.
+And check the summary of each data frame to get a general idea of how the data looks and if we need to do any more cleaning. 
+
+```{r join data and summary}
+#Put all the data in a global dataframe, fix the date format and add new column of combined Key
+global <- global_cases %>%
+  full_join(global_deaths) %>%
+  rename(`Country_Region`= `Country/Region`,
+         `Province_State` = `Province/State`) %>%
+  mutate(date = mdy(date)) %>%
+  unite("Combined_Key", c(Province_State, Country_Region),
+        sep = ", ", na.rm = TRUE, remove = FALSE)
+
+global <- global %>%
+  left_join(uid, by = c("Province_State", "Country_Region")) %>%
+  select(-c(UID,FIPS))%>%
+  select(Province_State, Country_Region, date, cases, deaths, Population, Combined_Key)
+
+#If both cases and deads for a given row are zero we get rid of such rows.
+global <- global[!(global$cases==0 & global$deaths==0),]
+
+
+
+summary(global)
+
+usa <- us_cases %>%
+  full_join(us_deaths)%>%
+  mutate(date = mdy(date)) 
+usa <- usa[!(usa$cases==0 & usa$deaths==0),]
+
+summary(usa)
+```
+
+
+We see that some rows in the global data frame dont have the population, so we take a look into what is such data.
+We look at the Combined key of the NA data
+```{r NA_pop}
+na_pop <- global[is.na(global$Population),] 
+
+max_date <- na_pop%>%
+  group_by(Combined_Key,Country_Region) %>%
+  summarize(date = max(date)) %>%
+  ungroup()
+  
+max_date<- left_join(max_date,na_pop, by = c('date','Combined_Key','Country_Region')) %>%
+  select(c('Country_Region','Combined_Key','date','cases','deaths'))
+
+max_date
+```
+
+The number of cases in most of them are very small compared to rest of the data and with the exception of the unkown, China is hard to add to a country in particular as they are cruises, or international events. So I will only keep the info of China from this data frame. As it says unknown for the province my guess is that are registered cases in china of traveling people or something like that, so if we want to see china as a whole we can add this cases, if we want to see it by province we wouldn't take it into account. 
+
+```{r delete_na_pop}
+global <-global[!(is.na(global$Population) & global$Country_Region!="China"),]
+```
+
+I will add a couple of new variables related to the date, days since the pandemic started and weeks since the pandemic started.
+
+```{r weeks}
+#We get the number of days since the first record in our dates.
+
+#This gives the number of days between 1970-01-01 and the first record in our data
+first_record = as.numeric(min(global$date)) 
+#Subtracting it we can get how many days into the pandemic each date is, or how many days after the data recorsd started apparently on January 22 2020. Using this info we can get how many weeks into the pandemic. The first 7 days would correspond to the first week days 8 to 14 to the second week and so on. 
+
+global <- global %>%
+  mutate(days_p = as.numeric(date)-first_record+1)%>%
+  mutate(weeks_p = trunc((days_p-1)/7)+1)
+```
+
+ 
+ 
+## Some graphs to visualize the data. 
+
+Now the data is tidier we can see some visualization, such as how the number of worldwide cases and deaths have increased since the beginning of the pandemic. I will use a log plot to have a better idea of whats going on.
+
+
+```{r world_cases, message = FALSE}
+global_country<- global %>%
+  group_by(Country_Region, date, weeks_p, days_p) %>%
+  summarize(Cases = sum(cases), Deaths = sum(deaths), Population = sum(Population, na.rm = TRUE)) %>%
+  mutate(cases_per_mill = Cases/Population*1000000, deaths_per_mill = Deaths/Population*1000000)%>%
+  ungroup()
+
+total_w = global %>%
+  group_by(date, weeks_p, days_p) %>%
+  summarize(Cases = sum(cases), Deaths = sum(deaths), Population = sum(Population, na.rm = TRUE)) %>%
+  mutate(cases_per_mill = Cases/Population*1000000, deaths_per_mill = Deaths/Population*1000000)%>%
+  ungroup()
+#Keep only data of the end of each week, or weekly data
+w_total_w = total_w[total_w$days_p/7==total_w$weeks_p,]
+w_global_country = global_country[(global_country$days_p/7==global_country$weeks_p),]
+
+ggplot(w_total_w, aes(x= date, y = Cases)) + 
+  geom_point(aes(colour = "cases"))+
+  geom_line(aes(colour = "cases")) + 
+  geom_point(aes( y= Deaths, colour = "deaths")) + 
+  geom_line(aes( y= Deaths, colour = "deaths")) + 
+  scale_y_log10() +
+  labs(title = "Covid-19 Worldwide", y = NULL, x = "Date" ,caption = "One data point corresponds to one week.")
+
+```
+
+
+Which is the Country with more cases and how was the time evolution?
+
+```{r max_country, message=FALSE}
+global_country[global_country$Cases == max(global_country$Cases),]
+
+max_c = global_country[global_country$Cases == max(global_country$Cases),]$Country_Region
+
+ggplot(w_global_country[w_global_country$Country_Region == max_c,],aes(x= date, y = Cases)) + 
+  geom_point(aes(colour = "cases"))+
+  geom_line(aes(colour = "cases")) + 
+  geom_point(aes( y= Deaths, colour = "deaths")) + 
+  geom_line(aes( y= Deaths, colour = "deaths")) + 
+  scale_y_log10() +
+  labs(title =  paste(max_c, "Covid-19"), y = NULL , x = "Date" ,caption = "One data point corresponds to one week.")
+
+  
+
+```
+
+
+## Some basic data Analysis
+
+We look now at new weekly cases and new weekly deaths both worldwide and in the `r max_c`. We look at the data weekly to avoid having noise because of reporting delays.  This plot wont be on logarithmic scale, so to be able to see both the new cases and new deaths in the same figure I will use two different Y axis. Just to say keep in mind that in the next figure the new cases and new dead are in different scales.  
+
+
+```{r new_cases}
+w_global_country <- w_global_country %>%
+  group_by(Country_Region)%>%
+  mutate(new_cases = Cases- lag(Cases), 
+         new_deaths = Deaths - lag(Deaths))%>%
+  ungroup()
+
+w_total_w = w_total_w %>%
+  mutate(new_cases = Cases- lag(Cases), new_deaths = Deaths - lag(Deaths))
+
+
+# Value used to transform the data
+coeff <- 50
+
+# A few constants
+newcasesColor <- "#69b3a2"
+newdeathsColor <- rgb(0.2, 0.6, 0.9, 1)
+
+ggplot(w_total_w, aes(x= date)) +
+  geom_point( aes(y=new_cases),size = 1, color=newcasesColor) + 
+  geom_line( aes(y=new_cases), color=newcasesColor) + 
+  geom_point( aes(y=new_deaths *coeff),size = 1,  color=newdeathsColor) + 
+  geom_line( aes(y=new_deaths *coeff),  color=newdeathsColor) +
+  scale_y_continuous(
+    
+    # Features of the first axis
+    name = "New Cases",
+    
+    # Add a second axis and specify its features
+    sec.axis = sec_axis(~.*1/coeff, name="New Deaths")
+  ) + 
+  
+
+  theme(
+    axis.title.y = element_text(color = newcasesColor, size=13),
+    axis.title.y.right = element_text(color = newdeathsColor, size=13)
+  )   +labs(title = "New cases Covid-19 Worldwide",x = "Date" ,caption = "One data point corresponds to one week.")
+
+```
+
+
+We repeat the visualization for the `r max_c` 
+```{r us_new_cases}
+
+ggplot(w_global_country[w_global_country$Country_Region == max_c,], aes(x= date)) +
+  geom_point( aes(y=new_cases),size = 1, color=newcasesColor) + 
+  geom_line( aes(y=new_cases), color=newcasesColor) + 
+  geom_point( aes(y=new_deaths *coeff),size = 1,  color=newdeathsColor) + 
+  geom_line( aes(y=new_deaths *coeff),  color=newdeathsColor) +
+  scale_y_continuous(
+    
+    # Features of the first axis
+    name = "New Cases",
+    
+    # Add a second axis and specify its features
+    sec.axis = sec_axis(~.*1/coeff, name="New Deaths")
+  ) + 
+  
+
+  theme(
+    axis.title.y = element_text(color = newcasesColor, size=13),
+    axis.title.y.right = element_text(color = newdeathsColor, size=13)
+  )   +labs(title = paste("New cases Covid-19",max_c)  ,x = "Date" ,caption = "One data point corresponds to one week.")
+
+
+```
+
+
+On both the World and the US graph we can see that  at the beginning of the pandemic the new deaths were higher compared with the number of new cases, while in the last wave, the number of new deaths decreased in comparison with the number of new cases. So we can say that the virus has become less deadly. This graphs does not give us the information of why this change happened. I think its because vaccines works, so we have become more resistant to the virus.  I recognize my bias here, as I know vaccines safe lives, but as I am not using any vaccination data in this analysis, I can't conclude from the data that the mortality decreased in part because of the vaccines. 
+
+On the lethality topic I will take a look at the mortality per millions. 
+
+
+
+
+
+### In which countries has Covid_19 been more deadly and less deadly. 
+
+Will just look at the Countries with more death per Million, and less death per million by looking at the current dates. 
+
+
+```{r mortality_per_mill}
+current <- global_country[global_country$date==max(global_country$date),]
+  
+slice(arrange(current,desc(deaths_per_mill)) %>%
+  select(-c('date','weeks_p','days_p')), 1:10)
+
+```
+ And the 10 countries with less death per million
+ 
+ 
+ 
+```{r, least_mortality_per_mill}
+current <- global_country[global_country$date==max(global_country$date),]
+  
+slice(arrange(current,deaths_per_mill) %>%
+  select(-c('date','weeks_p','days_p')), 1:10)
+```
+
+For the results of countries of least and most mortality per million, we should keep in mind there is some bias in the data as each country reports differently. Some countries might only record covid deaths for hospital patients that had a positive covid test, while other countries might record any excess deaths as covid deaths. There is not a universal reporting system. 
+ 
+Given that Peru is the Country with the highest deaths per millions, lets take a look at Peru's new cases and new deaths evolution, but this time in a logarithmic plot.  
+
+```{r peru}
+    coeff = 1
+
+peru <- w_global_country[w_global_country$Country_Region == "Peru",]
+ggplot(peru, aes(x= date)) +
+  geom_point( aes(y=new_cases),size = 1, color=newcasesColor) + 
+  geom_line( aes(y=new_cases), color=newcasesColor) + 
+  geom_point( aes(y=new_deaths *coeff),size = 1,  color=newdeathsColor) + 
+  geom_line( aes(y=new_deaths *coeff),  color=newdeathsColor) +
+  scale_y_log10(
+    
+    # Features of the first axis
+    name = "New Cases",
+    # Add a second axis and specify its features
+    sec.axis = sec_axis(~.*1/coeff, name="New Deaths")
+  ) + 
+  
+
+  theme(
+    axis.title.y = element_text(color = newcasesColor, size=13),
+    axis.title.y.right = element_text(color = newdeathsColor, size=13)
+  )   +labs(title = paste("New cases Covid-19 in Peru")  ,x = "Date" ,caption = "One data point corresponds to one week.")
+```
+ 
+ 
+## A very simple model. 
+ 
+ I will just look at a linear model on the deaths per Million in Peru based on the cases per million. 
+ First lets check at how the plot between those twoo and the color of the dot will reflect the week of the pandemic.  
+```{r peru graph}
+
+ggplot(peru, aes(x =cases_per_mill,y = deaths_per_mill,colour = weeks_p))  +
+  geom_point()  + labs(title= " Covid 19 Cases vs Deaths in Peru ")
+```
+
+
+We can see its pretty linear up to week 95, so I will only fit a model for the first 90 weeks.
+```{r peru first weeks}
+#Make the model
+mod = lm(deaths_per_mill~cases_per_mill, data = peru,subset = weeks_p<90)
+xmod = seq(min(peru$cases_per_mill), 68000,50)
+predic = data.frame(xm = xmod,ym = mod$coefficients[1]+xmod*mod$coefficients[2]  )
+ggplot(peru, aes(x =cases_per_mill,y = deaths_per_mill))  +
+  geom_point(color = "blue") +geom_line(color='red',data = predic, aes(x=xm, y=ym)) +labs(title= " Covid 19 Cases vs Deaths in Peru ", x= "Cases per 1M", y = "Deaths per 1M")
+
+```
+
+In the first 90 weeks of the pandemic in Peru a linear model fits the data. But after that its not longer linear. The details of the linear model are:
+
+```{r model details}
+summary(mod)
+```
+
+## Conclusions
+
+We looked at the worldwide evolution of Covid-19 and found that the Country with the most cases is the USA. When we looked at how the new cases and new deas changed we saw that at the begginig of the pandemic the virus was deadlier an as it evolved and as a society learned more about it, the new deaths went down when comparing them with the new cases, in the last wave of the virus in the first couple of months of 2022 there was a steep increase in the cases but not in the deaths. 
+Finally we looked at the country with the most deths per million and found there was a linear relation between the cases per million and deaths per million in the first 90 weeks of the pandemic. 
+
+There is bias in the way each country collects their cases and deaths data. 
+
+
+
+
+
+
+
+
